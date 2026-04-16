@@ -19,6 +19,7 @@ pub mod code_context_menus;
 mod code_lens;
 pub mod display_map;
 mod document_colors;
+mod document_links;
 mod document_symbols;
 mod editor_settings;
 mod element;
@@ -1357,6 +1358,8 @@ pub struct Editor {
     post_scroll_update: Task<()>,
     refresh_colors_task: Task<()>,
     refresh_code_lens_task: Task<()>,
+    refresh_document_links_task: Task<()>,
+    resolve_document_links_task: Task<()>,
     use_document_folding_ranges: bool,
     refresh_folding_ranges_task: Task<()>,
     inlay_hints: Option<LspInlayHintData>,
@@ -1372,6 +1375,7 @@ pub struct Editor {
     semantic_token_state: SemanticTokenState,
     pub(crate) refresh_matching_bracket_highlights_task: Task<()>,
     refresh_document_symbols_task: Shared<Task<()>>,
+    lsp_document_links: HashMap<BufferId, Vec<project::lsp_store::LspDocumentLink>>,
     lsp_document_symbols: HashMap<BufferId, Vec<OutlineItem<text::Anchor>>>,
     refresh_outline_symbols_at_cursor_at_cursor_task: Task<()>,
     outline_symbols_at_cursor: Option<(BufferId, Vec<OutlineItem<Anchor>>)>,
@@ -2627,6 +2631,8 @@ impl Editor {
             code_lens: None,
             refresh_colors_task: Task::ready(()),
             refresh_code_lens_task: Task::ready(()),
+            refresh_document_links_task: Task::ready(()),
+            resolve_document_links_task: Task::ready(()),
             use_document_folding_ranges: false,
             refresh_folding_ranges_task: Task::ready(()),
             inlay_hints: None,
@@ -2668,6 +2674,7 @@ impl Editor {
             number_deleted_lines: false,
             refresh_matching_bracket_highlights_task: Task::ready(()),
             refresh_document_symbols_task: Task::ready(()).shared(),
+            lsp_document_links: HashMap::default(),
             lsp_document_symbols: HashMap::default(),
             refresh_outline_symbols_at_cursor_at_cursor_task: Task::ready(()),
             outline_symbols_at_cursor: None,
@@ -25005,11 +25012,13 @@ impl Editor {
                     self.registered_buffers.remove(buffer_id);
                     self.clear_runnables(Some(*buffer_id));
                     self.semantic_token_state.invalidate_buffer(buffer_id);
+                    self.lsp_document_symbols.remove(buffer_id);
                     self.display_map.update(cx, |display_map, cx| {
                         display_map.invalidate_semantic_highlights(*buffer_id);
                         display_map.clear_lsp_folding_ranges(*buffer_id, cx);
                     });
                 }
+                self.clear_document_links_for_buffers(removed_buffer_ids.iter().copied());
 
                 self.display_map.update(cx, |display_map, cx| {
                     display_map.unfold_buffers(removed_buffer_ids.iter().copied(), cx);
@@ -25262,6 +25271,15 @@ impl Editor {
             let was_inline = self.code_lens.is_some();
             if code_lens_inline != was_inline {
                 self.toggle_code_lens(code_lens_inline, window, cx);
+            }
+
+            if EditorSettings::get_global(cx).lsp_document_links {
+                self.refresh_document_links(None, cx);
+            } else {
+                self.lsp_document_links.clear();
+                self.refresh_document_links_task = Task::ready(());
+                self.resolve_document_links_task = Task::ready(());
+                cx.notify();
             }
 
             self.refresh_inlay_hints(
@@ -26435,6 +26453,7 @@ impl Editor {
         }
         self.refresh_semantic_tokens(for_buffer, None, cx);
         self.refresh_document_colors(for_buffer, window, cx);
+        self.refresh_document_links(for_buffer, cx);
         self.refresh_folding_ranges(for_buffer, window, cx);
         self.refresh_code_lenses(for_buffer, window, cx);
         self.refresh_document_symbols(for_buffer, cx);
@@ -26608,6 +26627,7 @@ impl Editor {
         self.colorize_brackets(false, cx);
         self.refresh_inlay_hints(InlayHintRefreshReason::NewLinesShown, cx);
         self.resolve_visible_code_lenses(cx);
+        self.resolve_visible_document_links(cx);
         if !self.buffer().read(cx).is_singleton() || self.needs_initial_data_update {
             self.needs_initial_data_update = false;
             self.update_lsp_data(None, window, cx);
