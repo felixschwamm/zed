@@ -1,7 +1,7 @@
 use dispatch2::{DispatchQueue, DispatchQueueGlobalPriority, DispatchTime, GlobalQueueIdentifier};
 use gpui::{
-    GLOBAL_THREAD_TIMINGS, PlatformDispatcher, Priority, RunnableMeta, RunnableVariant, TaskTiming,
-    ThreadTaskTimings, add_task_timing,
+    PlatformDispatcher, Priority, RunnableMeta, RunnableVariant, TaskTiming, ThreadTaskTimings,
+    add_task_timing,
 };
 use mach2::{
     kern_return::KERN_SUCCESS,
@@ -37,12 +37,11 @@ impl MacDispatcher {
 
 impl PlatformDispatcher for MacDispatcher {
     fn get_all_timings(&self) -> Vec<ThreadTaskTimings> {
-        let global_timings = GLOBAL_THREAD_TIMINGS.lock();
-        ThreadTaskTimings::convert(&global_timings)
+        ThreadTaskTimings::collect_all()
     }
 
     fn get_current_thread_timings(&self) -> ThreadTaskTimings {
-        gpui::profiler::get_current_thread_task_timings()
+        ThreadTaskTimings::collect_current()
     }
 
     fn is_main_thread(&self) -> bool {

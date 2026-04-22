@@ -12,8 +12,8 @@ use std::{
 };
 
 use gpui::{
-    GLOBAL_THREAD_TIMINGS, PlatformDispatcher, Priority, PriorityQueueReceiver,
-    PriorityQueueSender, RunnableVariant, TaskTiming, ThreadTaskTimings, profiler,
+    PlatformDispatcher, Priority, PriorityQueueReceiver, PriorityQueueSender, RunnableVariant,
+    TaskTiming, ThreadTaskTimings, profiler,
 };
 
 struct TimerAfter {
@@ -130,12 +130,11 @@ impl LinuxDispatcher {
 
 impl PlatformDispatcher for LinuxDispatcher {
     fn get_all_timings(&self) -> Vec<gpui::ThreadTaskTimings> {
-        let global_timings = GLOBAL_THREAD_TIMINGS.lock();
-        ThreadTaskTimings::convert(&global_timings)
+        ThreadTaskTimings::collect_all()
     }
 
     fn get_current_thread_timings(&self) -> gpui::ThreadTaskTimings {
-        gpui::profiler::get_current_thread_task_timings()
+        ThreadTaskTimings::collect_current()
     }
 
     fn is_main_thread(&self) -> bool {

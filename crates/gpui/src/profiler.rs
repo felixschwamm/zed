@@ -1,10 +1,9 @@
 use scheduler::Instant;
 use std::{
-    cell::LazyCell,
     collections::{HashMap, VecDeque},
     hash::{DefaultHasher, Hash, Hasher},
-    sync::Arc,
-    thread::ThreadId,
+    sync::LazyLock,
+    thread::{self, ThreadId},
 };
 
 use serde::{Deserialize, Serialize};
@@ -29,33 +28,48 @@ pub struct ThreadTaskTimings {
 }
 
 impl ThreadTaskTimings {
-    /// Convert global thread timings into their structured format.
-    pub fn convert(timings: &[GlobalThreadTimings]) -> Vec<Self> {
-        timings
+    /// Collect a per-thread view of the current task timing buffer.
+    pub fn collect_all() -> Vec<Self> {
+        let store = PROFILER_STORE.lock();
+        let mut by_thread: HashMap<ThreadId, ThreadTaskTimings> = HashMap::new();
+        for entry in store.timings.iter() {
+            let bucket = by_thread
+                .entry(entry.thread_id)
+                .or_insert_with(|| ThreadTaskTimings {
+                    thread_name: store.names.get(&entry.thread_id).cloned(),
+                    thread_id: entry.thread_id,
+                    timings: Vec::new(),
+                    total_pushed: store
+                        .total_pushed_by_thread
+                        .get(&entry.thread_id)
+                        .copied()
+                        .unwrap_or_default(),
+                });
+            bucket.timings.push(entry.timing);
+        }
+        by_thread.into_values().collect()
+    }
+
+    /// Collect a view of the timings that originated on the current thread.
+    pub fn collect_current() -> Self {
+        let thread_id = thread::current().id();
+        let store = PROFILER_STORE.lock();
+        let timings = store
+            .timings
             .iter()
-            .filter_map(|t| match t.timings.upgrade() {
-                Some(timings) => Some((t.thread_id, timings)),
-                _ => None,
-            })
-            .map(|(thread_id, timings)| {
-                let timings = timings.lock();
-                let thread_name = timings.thread_name.clone();
-                let total_pushed = timings.total_pushed;
-                let timings = &timings.timings;
-
-                let mut vec = Vec::with_capacity(timings.len());
-                let (s1, s2) = timings.as_slices();
-                vec.extend_from_slice(s1);
-                vec.extend_from_slice(s2);
-
-                ThreadTaskTimings {
-                    thread_name,
-                    thread_id,
-                    timings: vec,
-                    total_pushed,
-                }
-            })
-            .collect()
+            .filter(|entry| entry.thread_id == thread_id)
+            .map(|entry| entry.timing)
+            .collect::<Vec<_>>();
+        ThreadTaskTimings {
+            thread_name: store.names.get(&thread_id).cloned(),
+            thread_id,
+            timings,
+            total_pushed: store
+                .total_pushed_by_thread
+                .get(&thread_id)
+                .copied()
+                .unwrap_or_default(),
+        }
     }
 }
 
@@ -241,119 +255,71 @@ impl ProfilingCollector {
     }
 }
 
-// Allow 16MiB of task timing entries.
-// VecDeque grows by doubling its capacity when full, so keep this a power of 2 to avoid wasting
-// memory.
-const MAX_TASK_TIMINGS: usize = (16 * 1024 * 1024) / core::mem::size_of::<TaskTiming>();
+/// Total cap on retained task timings. This is shared across all threads;
+/// when the buffer fills up, the oldest entry is evicted regardless of
+/// which thread produced it.
+///
+/// Keeping a single bounded buffer — rather than one per thread — avoids
+/// leaking memory when worker threads exit without running TLS destructors
+/// (which happens routinely for Apple's libdispatch and the Windows thread
+/// pool): otherwise every such exited worker would leak its own ring buffer.
+const MAX_TASK_TIMINGS: usize = (16 * 1024 * 1024) / core::mem::size_of::<StoredTiming>();
 
-#[doc(hidden)]
-pub(crate) type TaskTimings = VecDeque<TaskTiming>;
-
-#[doc(hidden)]
-pub type GuardedTaskTimings = spin::Mutex<ThreadTimings>;
-
-#[doc(hidden)]
-pub struct GlobalThreadTimings {
-    pub thread_id: ThreadId,
-    pub timings: std::sync::Weak<GuardedTaskTimings>,
-}
-
-#[doc(hidden)]
-pub static GLOBAL_THREAD_TIMINGS: spin::Mutex<Vec<GlobalThreadTimings>> =
-    spin::Mutex::new(Vec::new());
-
-thread_local! {
-    #[doc(hidden)]
-    pub static THREAD_TIMINGS: LazyCell<Arc<GuardedTaskTimings>> = LazyCell::new(|| {
-        let current_thread = std::thread::current();
-        let thread_name = current_thread.name();
-        let thread_id = current_thread.id();
-        let timings = ThreadTimings::new(thread_name.map(|e| e.to_string()), thread_id);
-        let timings = Arc::new(spin::Mutex::new(timings));
-
-        {
-            let timings = Arc::downgrade(&timings);
-            let global_timings = GlobalThreadTimings {
-                thread_id: std::thread::current().id(),
-                timings,
-            };
-            GLOBAL_THREAD_TIMINGS.lock().push(global_timings);
-        }
-
-        timings
-    });
-}
-
-#[doc(hidden)]
-pub struct ThreadTimings {
-    pub thread_name: Option<String>,
-    pub thread_id: ThreadId,
-    pub timings: TaskTimings,
-    pub total_pushed: u64,
-}
-
-impl ThreadTimings {
-    pub fn new(thread_name: Option<String>, thread_id: ThreadId) -> Self {
-        ThreadTimings {
-            thread_name,
-            thread_id,
-            timings: TaskTimings::new(),
-            total_pushed: 0,
-        }
-    }
-
-    /// If this task is the same as the last task, update the end time of the last task.
-    ///
-    /// Otherwise, add the new task timing to the list.
-    pub fn add_task_timing(&mut self, timing: TaskTiming) {
-        if let Some(last_timing) = self.timings.back_mut()
-            && last_timing.location == timing.location
-            && last_timing.start == timing.start
-        {
-            last_timing.end = timing.end;
-        } else {
-            while self.timings.len() + 1 > MAX_TASK_TIMINGS {
-                // This should only ever pop one element because it matches the insertion below.
-                self.timings.pop_front();
-            }
-            self.timings.push_back(timing);
-            self.total_pushed += 1;
-        }
-    }
-
-    pub fn get_thread_task_timings(&self) -> ThreadTaskTimings {
-        ThreadTaskTimings {
-            thread_name: self.thread_name.clone(),
-            thread_id: self.thread_id,
-            timings: self.timings.iter().cloned().collect(),
-            total_pushed: self.total_pushed,
-        }
-    }
-}
-
-impl Drop for ThreadTimings {
-    fn drop(&mut self) {
-        let mut thread_timings = GLOBAL_THREAD_TIMINGS.lock();
-
-        let Some((index, _)) = thread_timings
-            .iter()
-            .enumerate()
-            .find(|(_, t)| t.thread_id == self.thread_id)
-        else {
-            return;
-        };
-        thread_timings.swap_remove(index);
-    }
-}
+static PROFILER_STORE: LazyLock<spin::Mutex<ProfilerStore>> = LazyLock::new(|| {
+    spin::Mutex::new(ProfilerStore {
+        timings: VecDeque::with_capacity(MAX_TASK_TIMINGS),
+        total_pushed_by_thread: HashMap::new(),
+        names: HashMap::new(),
+    })
+});
 
 #[doc(hidden)]
 pub fn add_task_timing(timing: TaskTiming) {
-    THREAD_TIMINGS.with(|timings| {
-        timings.lock().add_task_timing(timing);
-    });
+    PROFILER_STORE.lock().push(timing);
 }
 
-#[doc(hidden)]
-pub fn get_current_thread_task_timings() -> ThreadTaskTimings {
-    THREAD_TIMINGS.with(|timings| timings.lock().get_thread_task_timings())
+#[derive(Copy, Clone)]
+struct StoredTiming {
+    thread_id: ThreadId,
+    timing: TaskTiming,
+}
+
+struct ProfilerStore {
+    timings: VecDeque<StoredTiming>,
+    /// `thread_id -> total number of timings ever pushed from this thread`.
+    /// Needed so `ProfilingCollector` can compute how far a thread's cursor
+    /// has advanced even after old entries have been evicted.
+    total_pushed_by_thread: HashMap<ThreadId, u64>,
+    /// `thread_id -> thread name` captured on each thread's first push.
+    names: HashMap<ThreadId, String>,
+}
+
+impl ProfilerStore {
+    fn push(&mut self, timing: TaskTiming) {
+        let current_thread = thread::current();
+        let thread_id = current_thread.id();
+
+        // Coalesce the pre-run and post-run pair emitted by the dispatcher
+        // trampoline for the same task into a single entry.
+        if let Some(last) = self.timings.back_mut()
+            && last.thread_id == thread_id
+            && last.timing.location == timing.location
+            && last.timing.start == timing.start
+        {
+            last.timing.end = timing.end;
+            return;
+        }
+
+        if self.timings.len() == MAX_TASK_TIMINGS {
+            self.timings.pop_front();
+        }
+
+        if let Some(name) = current_thread.name() {
+            self.names
+                .entry(thread_id)
+                .or_insert_with(|| name.to_owned());
+        }
+        *self.total_pushed_by_thread.entry(thread_id).or_insert(0) += 1;
+        self.timings.push_back(StoredTiming { thread_id, timing });
+    }
 }

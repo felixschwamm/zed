@@ -23,8 +23,8 @@ use windows::{
 
 use crate::{HWND, SafeHwnd, WM_GPUI_TASK_DISPATCHED_ON_MAIN_THREAD};
 use gpui::{
-    GLOBAL_THREAD_TIMINGS, PlatformDispatcher, Priority, PriorityQueueSender, RunnableVariant,
-    TaskTiming, ThreadTaskTimings, TimerResolutionGuard,
+    PlatformDispatcher, Priority, PriorityQueueSender, RunnableVariant, TaskTiming,
+    ThreadTaskTimings, TimerResolutionGuard,
 };
 
 pub(crate) struct WindowsDispatcher {
@@ -101,12 +101,11 @@ impl WindowsDispatcher {
 
 impl PlatformDispatcher for WindowsDispatcher {
     fn get_all_timings(&self) -> Vec<ThreadTaskTimings> {
-        let global_thread_timings = GLOBAL_THREAD_TIMINGS.lock();
-        ThreadTaskTimings::convert(&global_thread_timings)
+        ThreadTaskTimings::collect_all()
     }
 
     fn get_current_thread_timings(&self) -> gpui::ThreadTaskTimings {
-        gpui::profiler::get_current_thread_task_timings()
+        ThreadTaskTimings::collect_current()
     }
 
     fn is_main_thread(&self) -> bool {
