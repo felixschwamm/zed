@@ -49,11 +49,11 @@ path = "http_client_test.rs"
 [dependencies]
 anyhow = "1"
 futures = "0.3"
-gpui = { path = "../../../gpui" }
-gpui_platform = { path = "../../../gpui_platform" }
-gpui_util = { path = "../../../gpui_util" }
-gpui_web = { path = "../.." }
-http_client = { path = "../../../http_client" }
+gpui = { path = "../../../gpui", package = "gpui-pre" }
+gpui_platform = { path = "../../../gpui_platform", package = "gpui-pre-platform" }
+gpui_util = { path = "../../../gpui_util", package = "gpui-pre-util" }
+gpui_web = { path = "../..", package = "gpui-pre-web" }
+http_client = { path = "../../../http_client", package = "gpui-pre-http-client" }
 unicode-segmentation = "1"
 wasm-bindgen = "0.2"
 wasm-bindgen-futures = "0.4"

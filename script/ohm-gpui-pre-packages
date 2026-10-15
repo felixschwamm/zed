@@ -1,0 +1,143 @@
+#!/usr/bin/env python3
+"""Rename the GPUI crates to the `gpui-pre-*` package names published on crates.io.
+
+GPUI Kit depends on `gpui-pre`, `gpui-pre-platform`, ... at `=0.3.9`. Cargo's
+`[patch.crates-io]` only replaces a package with one of the same name and a
+matching version, so a fork that downstream apps can patch in must use those
+names and that version. Library names stay the Zed crate names (`gpui`,
+`gpui_platform`, ...), so Rust code is unaffected.
+
+The rewrite is idempotent. Run it from the repository root after rebasing onto
+a new Zed revision, then run `cargo metadata` to refresh Cargo.lock.
+"""
+
+import re
+import sys
+from pathlib import Path
+
+VERSION = "0.3.9"
+
+CRATES = {
+    "gpui": "crates/gpui",
+    "gpui_apple": "crates/gpui_apple",
+    "gpui_linux": "crates/gpui_linux",
+    "gpui_macos": "crates/gpui_macos",
+    "gpui_macros": "crates/gpui_macros",
+    "gpui_platform": "crates/gpui_platform",
+    "gpui_shared_string": "crates/gpui_shared_string",
+    "gpui_util": "crates/gpui_util",
+    "gpui_web": "crates/gpui_web",
+    "gpui_wgpu": "crates/gpui_wgpu",
+    "gpui_windows": "crates/gpui_windows",
+    "bench_metrics": "crates/bench_metrics",
+    "collections": "crates/collections",
+    "derive_refineable": "crates/refineable/derive_refineable",
+    "http_client": "crates/http_client",
+    "http_client_tls": "crates/http_client_tls",
+    "refineable": "crates/refineable",
+    "reqwest_client": "crates/reqwest_client",
+    "scheduler": "crates/scheduler",
+    "sum_tree": "crates/sum_tree",
+    "zlog": "crates/zlog",
+    "ztracing": "crates/ztracing",
+    "ztracing_macro": "crates/ztracing_macro",
+}
+
+# Manifests outside the workspace that reference the crates by path.
+EXTRA_PATH_CONSUMERS = ["crates/gpui_web/examples/hello_web/Cargo.toml"]
+
+
+def published_name(crate: str) -> str:
+    if crate == "gpui":
+        return "gpui-pre"
+    return "gpui-pre-" + crate.removeprefix("gpui_").replace("_", "-")
+
+
+def split_sections(text: str) -> list[tuple[str, list[str]]]:
+    sections: list[tuple[str, list[str]]] = [("", [])]
+    for line in text.splitlines(keepends=True):
+        header = re.match(r"^\s*\[([^\]]+)\]\s*$", line)
+        if header and not line.lstrip().startswith("[["):
+            sections.append((header.group(1).strip(), [line]))
+        elif line.lstrip().startswith("[["):
+            sections.append((line.strip(), [line]))
+        else:
+            sections[-1][1].append(line)
+    return sections
+
+
+def join_sections(sections: list[tuple[str, list[str]]]) -> str:
+    return "".join("".join(lines) for _, lines in sections)
+
+
+def rewrite_crate_manifest(path: Path, crate: str) -> None:
+    sections = split_sections(path.read_text())
+    has_lib = False
+    for name, lines in sections:
+        if name == "package":
+            for index, line in enumerate(lines):
+                if re.match(r"^name\s*=", line):
+                    lines[index] = f'name = "{published_name(crate)}"\n'
+                elif re.match(r"^version\s*=", line):
+                    lines[index] = f'version = "{VERSION}"\n'
+        elif name == "lib":
+            has_lib = True
+            if not any(re.match(r"^name\s*=", line) for line in lines):
+                lines.insert(1, f'name = "{crate}"\n')
+    if not has_lib:
+        package_index = next(
+            index for index, (name, _) in enumerate(sections) if name == "package"
+        )
+        sections.insert(package_index + 1, ("lib", ["[lib]\n", f'name = "{crate}"\n', "\n"]))
+    path.write_text(join_sections(sections))
+
+
+def add_package_key(line: str, crate: str) -> str:
+    if "package =" in line:
+        return re.sub(r'package\s*=\s*"[^"]*"', f'package = "{published_name(crate)}"', line)
+    line = re.sub(r',\s*version\s*=\s*"[^"]*"', "", line)
+    return re.sub(r"\s*\}\s*$", f', package = "{published_name(crate)}" }}', line.rstrip("\n")) + "\n"
+
+
+def rewrite_dependency_lines(path: Path, sections_filter) -> None:
+    sections = split_sections(path.read_text())
+    pattern = re.compile(r"^(" + "|".join(map(re.escape, CRATES)) + r")\s*=\s*\{.*\bpath\s*=")
+    for name, lines in sections:
+        if not sections_filter(name):
+            continue
+        for index, line in enumerate(lines):
+            match = pattern.match(line)
+            if match:
+                lines[index] = add_package_key(line, match.group(1))
+    path.write_text(join_sections(sections))
+
+
+def rewrite_profile_overrides(path: Path) -> None:
+    sections = split_sections(path.read_text())
+    pattern = re.compile(r"^(" + "|".join(map(re.escape, CRATES)) + r")(\s*=)")
+    for name, lines in sections:
+        if not re.match(r"^profile\.[^.]+\.package$", name):
+            continue
+        for index, line in enumerate(lines):
+            match = pattern.match(line)
+            if match:
+                lines[index] = published_name(match.group(1)) + line[match.end(1):]
+    path.write_text(join_sections(sections))
+
+
+def main() -> int:
+    root = Path.cwd()
+    if not (root / "crates/gpui/Cargo.toml").exists():
+        print("run from the repository root", file=sys.stderr)
+        return 1
+    for crate, directory in CRATES.items():
+        rewrite_crate_manifest(root / directory / "Cargo.toml", crate)
+    rewrite_dependency_lines(root / "Cargo.toml", lambda name: name == "workspace.dependencies")
+    rewrite_profile_overrides(root / "Cargo.toml")
+    for manifest in EXTRA_PATH_CONSUMERS:
+        rewrite_dependency_lines(root / manifest, lambda name: "dependencies" in name)
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

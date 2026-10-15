@@ -1,6 +1,6 @@
 [package]
-name = "http_client_tls"
-version = "0.1.0"
+name = "gpui-pre-http-client-tls"
+version = "0.3.9"
 edition.workspace = true
 publish.workspace = true
 license = "Apache-2.0"
@@ -12,6 +12,7 @@ workspace = true
 test-support = []
 
 [lib]
+name = "http_client_tls"
 path = "src/http_client_tls.rs"
 doctest = false
 test = false

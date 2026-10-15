@@ -1,6 +1,6 @@
 [package]
-name = "bench_metrics"
-version = "0.1.0"
+name = "gpui-pre-bench-metrics"
+version = "0.3.9"
 edition.workspace = true
 publish = false
 license = "Apache-2.0"
@@ -9,6 +9,7 @@ license = "Apache-2.0"
 workspace = true
 
 [lib]
+name = "bench_metrics"
 path = "src/bench_metrics.rs"
 doctest = false
 
