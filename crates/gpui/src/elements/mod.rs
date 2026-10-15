@@ -11,6 +11,8 @@ mod surface;
 mod svg;
 mod text;
 mod uniform_list;
+#[cfg(feature = "wgpu")]
+mod wgpu_canvas;
 
 pub use anchored::*;
 pub use animation::*;
@@ -25,3 +27,5 @@ pub use surface::*;
 pub use svg::*;
 pub use text::*;
 pub use uniform_list::*;
+#[cfg(feature = "wgpu")]
+pub use wgpu_canvas::*;

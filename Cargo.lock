@@ -7426,6 +7426,7 @@ dependencies = [
  "wasm-bindgen",
  "web-sys",
  "web-time",
+ "wgpu",
  "windows 0.62.2",
  "zed-scap",
 ]

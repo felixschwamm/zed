@@ -3,8 +3,9 @@ use anyhow::{Context as _, Result};
 use bytemuck::{Pod, Zeroable};
 use collections::FxHashMap;
 use gpui::{
-    AtlasTextureId, Background, Bounds, DevicePixels, GpuSpecs, Path, Point, PrimitiveBatch,
-    ScaledPixels, Scene, Size, get_gamma_correction_ratios,
+    AtlasTextureId, AtlasTextureKind, AtlasTile, Background, Bounds, DevicePixels, GpuSpecs,
+    Path, Point, PolychromeSprite, PrimitiveBatch, ScaledPixels, Scene, Size, TileId,
+    WGPU_CANVAS_FORMAT, WgpuCanvasFrame, get_gamma_correction_ratios, point,
 };
 use log::warn;
 #[cfg(not(target_family = "wasm"))]
@@ -194,6 +195,15 @@ struct WgpuResources {
     path_intermediate_view: Option<wgpu::TextureView>,
     path_msaa_texture: Option<wgpu::Texture>,
     path_msaa_view: Option<wgpu::TextureView>,
+    wgpu_canvas_targets: FxHashMap<u64, WgpuCanvasTarget>,
+}
+
+/// The offscreen texture a `wgpu_canvas` renders into, kept across frames while the canvas
+/// stays in the scene with the same size.
+struct WgpuCanvasTarget {
+    texture: wgpu::Texture,
+    view: wgpu::TextureView,
+    bind_group: wgpu::BindGroup,
 }
 
 struct CachedTextureBindGroup {
@@ -1353,6 +1363,7 @@ impl WgpuRendererCore {
                 path_intermediate_view: None,
                 path_msaa_texture: None,
                 path_msaa_view: None,
+                wgpu_canvas_targets: FxHashMap::default(),
             },
             atlas,
             path_globals_offset,
@@ -1505,6 +1516,11 @@ impl WgpuRendererCore {
                     label: Some("main_encoder"),
                 });
 
+        // Canvases render into their own targets before the main pass so that compositing
+        // them does not split it.
+        let wgpu_canvas_sprites =
+            self.render_wgpu_canvases(scene, &mut encoder, &mut instance_offset)?;
+
         {
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("main_pass"),
@@ -1612,6 +1628,9 @@ impl WgpuRendererCore {
                     // Surfaces are macOS-only for video playback and are not
                     // implemented by the WGPU renderer.
                     PrimitiveBatch::Surfaces(_surfaces) => {}
+                    PrimitiveBatch::WgpuCanvases(range) => {
+                        self.draw_wgpu_canvases(scene, &wgpu_canvas_sprites, range, &mut pass)
+                    }
                 }
             }
         }
@@ -1660,6 +1679,145 @@ impl WgpuRendererCore {
                 &scene.polychrome_sprites,
             )?,
         })
+    }
+
+    /// Runs the paint callback of every canvas in the scene against its offscreen target and
+    /// returns the sprites that composite the targets, indexed like `scene.wgpu_canvases`.
+    fn render_wgpu_canvases(
+        &mut self,
+        scene: &Scene,
+        encoder: &mut wgpu::CommandEncoder,
+        instance_offset: &mut u64,
+    ) -> Result<InstanceBinding> {
+        let mut sprites = Vec::with_capacity(scene.wgpu_canvases.len());
+        let mut rendered = SmallVec::<[u64; 4]>::new();
+        for canvas in &scene.wgpu_canvases {
+            let width = (canvas.bounds.size.width.0.round() as u32).clamp(1, self.max_texture_size);
+            let height =
+                (canvas.bounds.size.height.0.round() as u32).clamp(1, self.max_texture_size);
+            sprites.push(PolychromeSprite {
+                order: canvas.order,
+                pad: 0,
+                grayscale: false.into(),
+                opacity: canvas.opacity,
+                bounds: canvas.bounds,
+                content_mask: canvas.content_mask,
+                corner_radii: canvas.corner_radii,
+                tile: AtlasTile {
+                    texture_id: AtlasTextureId {
+                        index: 0,
+                        kind: AtlasTextureKind::Polychrome,
+                    },
+                    tile_id: TileId(0),
+                    padding: 0,
+                    bounds: Bounds {
+                        origin: point(DevicePixels(0), DevicePixels(0)),
+                        size: Size {
+                            width: DevicePixels(width as i32),
+                            height: DevicePixels(height as i32),
+                        },
+                    },
+                },
+            });
+
+            // A canvas painted more than once in a frame renders once; every occurrence
+            // composites the same target.
+            if rendered.contains(&canvas.id) {
+                continue;
+            }
+            rendered.push(canvas.id);
+
+            let target_is_new = !self
+                .resources
+                .wgpu_canvas_targets
+                .get(&canvas.id)
+                .is_some_and(|target| {
+                    target.texture.width() == width && target.texture.height() == height
+                });
+            if target_is_new {
+                let target = self.create_wgpu_canvas_target(width, height);
+                self.resources
+                    .wgpu_canvas_targets
+                    .insert(canvas.id, target);
+            }
+            let resources = &self.resources;
+            let Some(target) = resources.wgpu_canvas_targets.get(&canvas.id) else {
+                continue;
+            };
+            (canvas.paint)(&mut WgpuCanvasFrame {
+                device: &resources.device,
+                queue: &resources.queue,
+                encoder,
+                target: &target.texture,
+                target_view: &target.view,
+                size: Size {
+                    width: DevicePixels(width as i32),
+                    height: DevicePixels(height as i32),
+                },
+                scale_factor: canvas.scale_factor,
+                target_is_new,
+            });
+        }
+        self.resources
+            .wgpu_canvas_targets
+            .retain(|id, _| rendered.contains(id));
+
+        self.write_instance_binding("wgpu_canvas_sprites_bind_group", instance_offset, &sprites)
+    }
+
+    fn create_wgpu_canvas_target(&self, width: u32, height: u32) -> WgpuCanvasTarget {
+        let texture = self
+            .resources
+            .device
+            .create_texture(&wgpu::TextureDescriptor {
+                label: Some("wgpu_canvas_target"),
+                size: wgpu::Extent3d {
+                    width,
+                    height,
+                    depth_or_array_layers: 1,
+                },
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: wgpu::TextureDimension::D2,
+                format: WGPU_CANVAS_FORMAT,
+                usage: wgpu::TextureUsages::RENDER_ATTACHMENT
+                    | wgpu::TextureUsages::TEXTURE_BINDING
+                    | wgpu::TextureUsages::COPY_SRC
+                    | wgpu::TextureUsages::COPY_DST,
+                view_formats: &[],
+            });
+        let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
+        let bind_group = self.create_texture_bind_group("wgpu_canvas_bind_group", &view);
+        WgpuCanvasTarget {
+            texture,
+            view,
+            bind_group,
+        }
+    }
+
+    fn draw_wgpu_canvases(
+        &self,
+        scene: &Scene,
+        sprites: &InstanceBinding,
+        range: Range<usize>,
+        pass: &mut wgpu::RenderPass<'_>,
+    ) {
+        let resources = self.resources();
+        for index in range {
+            let Some(target) = scene
+                .wgpu_canvases
+                .get(index)
+                .and_then(|canvas| resources.wgpu_canvas_targets.get(&canvas.id))
+            else {
+                continue;
+            };
+            let instance = sprites.first_instance + index as u32;
+            pass.set_pipeline(&resources.pipelines.poly_sprites);
+            pass.set_bind_group(0, &resources.globals_bind_group, &[]);
+            pass.set_bind_group(1, &sprites.bind_group, &[]);
+            pass.set_bind_group(2, &target.bind_group, &[]);
+            pass.draw(0..4, instance..instance + 1);
+        }
     }
 
     fn create_texture_bind_group(

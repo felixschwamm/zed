@@ -50,6 +50,7 @@ pub struct Scene {
     pub subpixel_sprites: Vec<SubpixelSprite>,
     pub polychrome_sprites: Vec<PolychromeSprite>,
     pub surfaces: Vec<PaintSurface>,
+    pub wgpu_canvases: Vec<PaintWgpuCanvas>,
 }
 
 #[expect(missing_docs)]
@@ -66,6 +67,7 @@ impl Scene {
         self.subpixel_sprites.clear();
         self.polychrome_sprites.clear();
         self.surfaces.clear();
+        self.wgpu_canvases.clear();
     }
 
     pub fn len(&self) -> usize {
@@ -133,6 +135,10 @@ impl Scene {
                 surface.order = order;
                 self.surfaces.push(surface.clone());
             }
+            Primitive::WgpuCanvas(canvas) => {
+                canvas.order = order;
+                self.wgpu_canvases.push(canvas.clone());
+            }
         }
         self.paint_operations
             .push(PaintOperation::Primitive(primitive));
@@ -160,6 +166,7 @@ impl Scene {
         self.polychrome_sprites
             .sort_by_key(|sprite| (sprite.order, sprite.tile.tile_id));
         self.surfaces.sort_by_key(|surface| surface.order);
+        self.wgpu_canvases.sort_by_key(|canvas| canvas.order);
     }
 
     #[cfg_attr(
@@ -187,6 +194,8 @@ impl Scene {
             polychrome_sprites_iter: self.polychrome_sprites.iter().peekable(),
             surfaces_start: 0,
             surfaces_iter: self.surfaces.iter().peekable(),
+            wgpu_canvases_start: 0,
+            wgpu_canvases_iter: self.wgpu_canvases.iter().peekable(),
         }
     }
 }
@@ -209,6 +218,7 @@ pub(crate) enum PrimitiveKind {
     SubpixelSprite,
     PolychromeSprite,
     Surface,
+    WgpuCanvas,
 }
 
 pub(crate) enum PaintOperation {
@@ -228,6 +238,7 @@ pub enum Primitive {
     SubpixelSprite(SubpixelSprite),
     PolychromeSprite(PolychromeSprite),
     Surface(PaintSurface),
+    WgpuCanvas(PaintWgpuCanvas),
 }
 
 #[expect(missing_docs)]
@@ -242,6 +253,7 @@ impl Primitive {
             Primitive::SubpixelSprite(sprite) => &sprite.bounds,
             Primitive::PolychromeSprite(sprite) => &sprite.bounds,
             Primitive::Surface(surface) => &surface.bounds,
+            Primitive::WgpuCanvas(canvas) => &canvas.bounds,
         }
     }
 
@@ -255,6 +267,7 @@ impl Primitive {
             Primitive::SubpixelSprite(sprite) => &sprite.content_mask,
             Primitive::PolychromeSprite(sprite) => &sprite.content_mask,
             Primitive::Surface(surface) => &surface.content_mask,
+            Primitive::WgpuCanvas(canvas) => &canvas.content_mask,
         }
     }
 }
@@ -283,6 +296,8 @@ struct BatchIterator<'a> {
     polychrome_sprites_iter: Peekable<slice::Iter<'a, PolychromeSprite>>,
     surfaces_start: usize,
     surfaces_iter: Peekable<slice::Iter<'a, PaintSurface>>,
+    wgpu_canvases_start: usize,
+    wgpu_canvases_iter: Peekable<slice::Iter<'a, PaintWgpuCanvas>>,
 }
 
 impl<'a> Iterator for BatchIterator<'a> {
@@ -315,6 +330,10 @@ impl<'a> Iterator for BatchIterator<'a> {
             (
                 self.surfaces_iter.peek().map(|s| s.order),
                 PrimitiveKind::Surface,
+            ),
+            (
+                self.wgpu_canvases_iter.peek().map(|c| c.order),
+                PrimitiveKind::WgpuCanvas,
             ),
         ];
         orders_and_kinds.sort_by_key(|(order, kind)| (order.unwrap_or(u32::MAX), *kind));
@@ -461,6 +480,20 @@ impl<'a> Iterator for BatchIterator<'a> {
                 self.surfaces_start = surfaces_end;
                 Some(PrimitiveBatch::Surfaces(surfaces_start..surfaces_end))
             }
+            PrimitiveKind::WgpuCanvas => {
+                let canvases_start = self.wgpu_canvases_start;
+                let mut canvases_end = canvases_start + 1;
+                self.wgpu_canvases_iter.next();
+                while self
+                    .wgpu_canvases_iter
+                    .next_if(|canvas| (canvas.order, batch_kind) < max_order_and_kind)
+                    .is_some()
+                {
+                    canvases_end += 1;
+                }
+                self.wgpu_canvases_start = canvases_end;
+                Some(PrimitiveBatch::WgpuCanvases(canvases_start..canvases_end))
+            }
         }
     }
 }
@@ -493,6 +526,7 @@ pub enum PrimitiveBatch {
         range: Range<usize>,
     },
     Surfaces(Range<usize>),
+    WgpuCanvases(Range<usize>),
 }
 
 impl PrimitiveBatch {
@@ -525,6 +559,7 @@ impl PrimitiveBatch {
                 )
             }
             Self::Surfaces(range) => format!("surfaces ({})", range.len()),
+            Self::WgpuCanvases(range) => format!("wgpu canvases ({})", range.len()),
         }
     }
 }
@@ -776,6 +811,35 @@ pub struct PaintSurface {
 impl From<PaintSurface> for Primitive {
     fn from(surface: PaintSurface) -> Self {
         Primitive::Surface(surface)
+    }
+}
+
+/// Content rendered by the application with wgpu into an offscreen texture that
+/// the renderer composites at `bounds`. Renderers without wgpu skip it.
+#[derive(Clone)]
+pub struct PaintWgpuCanvas {
+    /// Position in the scene's paint order.
+    pub order: DrawOrder,
+    /// Where the canvas texture is composited, snapped to device pixels.
+    pub bounds: Bounds<ScaledPixels>,
+    /// The clip applied while compositing.
+    pub content_mask: ContentMask<ScaledPixels>,
+    /// Rounded corners applied while compositing.
+    pub corner_radii: Corners<ScaledPixels>,
+    /// Opacity applied while compositing.
+    pub opacity: f32,
+    /// Identifies the canvas across frames so its texture can be reused.
+    pub id: u64,
+    /// The window's scale factor when the canvas was painted.
+    pub scale_factor: f32,
+    /// Records the canvas content.
+    #[cfg(feature = "wgpu")]
+    pub paint: crate::WgpuCanvasPaint,
+}
+
+impl From<PaintWgpuCanvas> for Primitive {
+    fn from(canvas: PaintWgpuCanvas) -> Self {
+        Primitive::WgpuCanvas(canvas)
     }
 }
 

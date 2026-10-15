@@ -211,6 +211,8 @@ pub use taffy::{AvailableSpace, LayoutId};
 pub use test::*;
 pub use text_system::*;
 pub use util::{FutureExt, Timeout};
+#[cfg(feature = "wgpu")]
+pub use wgpu;
 pub use view::*;
 pub use window::*;
 

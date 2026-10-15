@@ -385,6 +385,8 @@ impl DirectXRenderer {
                     self.draw_polychrome_sprites(texture_id, range.start, range.len())
                 }
                 PrimitiveBatch::Surfaces(range) => self.draw_surfaces(&scene.surfaces[range]),
+                // wgpu canvases need the wgpu renderer; DirectX leaves them empty.
+                PrimitiveBatch::WgpuCanvases(_) => Ok(()),
             }
             .with_context(|| {
                 format!(

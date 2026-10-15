@@ -5171,6 +5171,40 @@ impl Window {
         });
     }
 
+    /// Paints a [`crate::wgpu_canvas`] into the scene for the next frame at the current z-index.
+    ///
+    /// This method should only be called as part of the paint phase of element drawing.
+    #[cfg(feature = "wgpu")]
+    pub fn paint_wgpu_canvas(
+        &mut self,
+        bounds: Bounds<Pixels>,
+        corner_radii: Corners<Pixels>,
+        id: u64,
+        paint: crate::WgpuCanvasPaint,
+    ) {
+        self.invalidator.debug_assert_paint();
+
+        let scale_factor = self.scale_factor();
+        let corner_radii = corner_radii
+            .clamp_radii_for_quad_size(bounds.size)
+            .scale(scale_factor);
+        let bounds = self.snap_bounds(bounds);
+        let content_mask = self.snapped_content_mask();
+        let opacity = self.element_opacity();
+        self.next_frame
+            .scene
+            .insert_primitive(crate::PaintWgpuCanvas {
+                order: 0,
+                bounds,
+                content_mask,
+                corner_radii,
+                opacity,
+                id,
+                scale_factor,
+                paint,
+            });
+    }
+
     /// Removes an image from the sprite atlas.
     pub fn drop_image(&mut self, data: Arc<RenderImage>) -> Result<()> {
         for frame_index in 0..data.frame_count() {

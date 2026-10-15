@@ -46,6 +46,8 @@ screen-capture = [
 windows-manifest = ["dep:embed-resource"]
 profiler = ["dep:hdrhistogram"]
 stacker = ["dep:stacksafe"]
+# Exposes `wgpu` and the `wgpu_canvas` element. Enabled by gpui_wgpu.
+wgpu = ["dep:wgpu"]
 
 [lib]
 name = "gpui"
@@ -116,6 +118,7 @@ spin.workspace = true
 url.workspace = true
 uuid = { workspace = true, features = ["v4"] }
 web-time = { workspace = true, optional = true }
+wgpu = { workspace = true, optional = true }
 heapless.workspace = true
 
 [target.'cfg(all(target_arch = "wasm32", target_os = "unknown"))'.dependencies]

@@ -793,6 +793,8 @@ impl MetalRenderer {
                     command_encoder,
                 ),
                 PrimitiveBatch::SubpixelSprites { .. } => unreachable!(),
+                // wgpu canvases need the wgpu renderer; Metal leaves them empty.
+                PrimitiveBatch::WgpuCanvases(_) => {}
             }
         }
 
