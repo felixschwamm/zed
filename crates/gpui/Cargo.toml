@@ -200,6 +200,11 @@ name = "hello_world"
 path = "examples/hello_world.rs"
 
 [[example]]
+name = "wgpu_canvas"
+path = "examples/wgpu_canvas.rs"
+required-features = ["wgpu"]
+
+[[example]]
 name = "move_entity_between_windows"
 path = "examples/move_entity_between_windows.rs"
 
