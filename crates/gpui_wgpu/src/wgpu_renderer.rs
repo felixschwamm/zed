@@ -134,6 +134,8 @@ struct WgpuPipelines {
     poly_sprites: wgpu::RenderPipeline,
     #[allow(dead_code)]
     surfaces: wgpu::RenderPipeline,
+    #[cfg_attr(not(any(target_os = "linux", target_os = "freebsd")), allow(dead_code))]
+    texture_surfaces: wgpu::RenderPipeline,
 }
 
 /// One frame allocation of instance data, ready to bind.
@@ -161,6 +163,8 @@ struct WgpuBindGroupLayouts {
     instances: wgpu::BindGroupLayout,
     texture: wgpu::BindGroupLayout,
     surfaces: wgpu::BindGroupLayout,
+    #[cfg_attr(not(any(target_os = "linux", target_os = "freebsd")), allow(dead_code))]
+    texture_surfaces: wgpu::BindGroupLayout,
 }
 
 /// Shared GPU context reference, used to coordinate device recovery across multiple windows.
@@ -608,11 +612,46 @@ impl WgpuRendererCore {
             ],
         });
 
+        let texture_surfaces = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("texture_surfaces_layout"),
+            entries: &[
+                wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: wgpu::ShaderStages::VERTEX_FRAGMENT,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: false,
+                        min_binding_size: NonZeroU64::new(
+                            std::mem::size_of::<SurfaceParams>() as u64
+                        ),
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 1,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 2,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                    count: None,
+                },
+            ],
+        });
+
         WgpuBindGroupLayouts {
             globals,
             instances,
             texture,
             surfaces,
+            texture_surfaces,
         }
     }
 
@@ -925,6 +964,19 @@ impl WgpuRendererCore {
             &layouts.surfaces,
             None,
             wgpu::PrimitiveTopology::TriangleStrip,
+            &[Some(color_target.clone())],
+            1,
+            &shader_module,
+        );
+
+        let texture_surfaces = create_pipeline(
+            "texture_surfaces",
+            "vs_surface",
+            "fs_texture_surface",
+            &layouts.globals,
+            &layouts.texture_surfaces,
+            None,
+            wgpu::PrimitiveTopology::TriangleStrip,
             &[Some(color_target)],
             1,
             &shader_module,
@@ -940,6 +992,7 @@ impl WgpuRendererCore {
             subpixel_sprites,
             poly_sprites,
             surfaces,
+            texture_surfaces,
         }
     }
 
@@ -1113,6 +1166,16 @@ impl WgpuRenderer {
             device_name: adapter_info.name.clone(),
             driver_name: adapter_info.driver.clone(),
             driver_info: adapter_info.driver_info.clone(),
+        })
+    }
+
+    /// The device and queue this renderer draws with.
+    pub fn device(&self) -> Option<crate::WgpuDevice> {
+        let core = self.core()?;
+        Some(crate::WgpuDevice {
+            device: Arc::clone(&core.resources.device),
+            queue: Arc::clone(&core.resources.queue),
+            adapter_info: core.adapter_info.clone(),
         })
     }
 
@@ -1609,8 +1672,13 @@ impl WgpuRendererCore {
                             &mut pass,
                         )?;
                     }
-                    // Surfaces are macOS-only for video playback and are not
-                    // implemented by the WGPU renderer.
+                    #[cfg(any(target_os = "linux", target_os = "freebsd"))]
+                    PrimitiveBatch::Surfaces(range) => {
+                        self.draw_texture_surfaces(&scene.surfaces[range], &mut pass);
+                    }
+                    // Only textures of the application are drawn; there is no
+                    // equivalent of macOS's CoreVideo surfaces elsewhere.
+                    #[cfg(not(any(target_os = "linux", target_os = "freebsd")))]
                     PrimitiveBatch::Surfaces(_surfaces) => {}
                 }
             }
@@ -1729,6 +1797,58 @@ impl WgpuRendererCore {
                     bind_group,
                 },
             );
+        }
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "freebsd"))]
+    fn draw_texture_surfaces(
+        &self,
+        surfaces: &[gpui::PaintSurface],
+        pass: &mut wgpu::RenderPass<'_>,
+    ) {
+        use wgpu::util::DeviceExt as _;
+
+        let resources = self.resources();
+        for surface in surfaces {
+            let Some(view) = surface.texture.handle().downcast_ref::<wgpu::TextureView>() else {
+                log::error!("external texture handle is not a wgpu::TextureView");
+                continue;
+            };
+            let params = SurfaceParams {
+                bounds: surface.bounds.into(),
+                content_mask: surface.content_mask.bounds.into(),
+            };
+            let params = resources
+                .device
+                .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                    label: Some("texture_surface_params"),
+                    contents: bytemuck::bytes_of(&params),
+                    usage: wgpu::BufferUsages::UNIFORM,
+                });
+            let bind_group = resources
+                .device
+                .create_bind_group(&wgpu::BindGroupDescriptor {
+                    label: Some("texture_surface_bind_group"),
+                    layout: &resources.bind_group_layouts.texture_surfaces,
+                    entries: &[
+                        wgpu::BindGroupEntry {
+                            binding: 0,
+                            resource: params.as_entire_binding(),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 1,
+                            resource: wgpu::BindingResource::TextureView(view),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 2,
+                            resource: wgpu::BindingResource::Sampler(&resources.atlas_sampler),
+                        },
+                    ],
+                });
+            pass.set_pipeline(&resources.pipelines.texture_surfaces);
+            pass.set_bind_group(0, &resources.globals_bind_group, &[]);
+            pass.set_bind_group(1, &bind_group, &[]);
+            pass.draw(0..4, 0..1);
         }
     }
 
@@ -2673,6 +2793,69 @@ mod tests {
     const BLUE: [u8; 4] = [0, 0, 255, 255];
     #[cfg(target_os = "linux")]
     const BLACK: [u8; 4] = [0, 0, 0, 255];
+
+    /// An application texture composites with its bytes unchanged: the same
+    /// sRGB-encoded color as a GPUI quad, clipped by its content mask.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn headless_renderer_composites_external_textures() -> anyhow::Result<()> {
+        const VIOLET: [u8; 4] = [109, 75, 242, 255];
+        let mut renderer = WgpuHeadlessRenderer::new()?;
+        let device = &renderer.context.device;
+        let texture = device.create_texture(&wgpu::TextureDescriptor {
+            label: None,
+            size: wgpu::Extent3d {
+                width: 2,
+                height: 1,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::Rgba8Unorm,
+            usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+            view_formats: &[],
+        });
+        renderer.context.queue.write_texture(
+            texture.as_image_copy(),
+            &[VIOLET, VIOLET].concat(),
+            wgpu::TexelCopyBufferLayout {
+                offset: 0,
+                bytes_per_row: Some(8),
+                rows_per_image: Some(1),
+            },
+            texture.size(),
+        );
+        let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
+
+        let bounds = |x: f32, width: f32| Bounds {
+            origin: Point {
+                x: x.into(),
+                y: 0.0.into(),
+            },
+            size: Size {
+                width: width.into(),
+                height: 16.0.into(),
+            },
+        };
+        let mut scene = Scene::default();
+        scene.insert_primitive(solid_quad(0.0, 0.0, 16.0, 16.0, gpui::rgb(0x6d4bf2).into()));
+        scene.insert_primitive(gpui::PaintSurface {
+            order: 0,
+            bounds: bounds(16.0, 32.0),
+            content_mask: ContentMask {
+                bounds: bounds(16.0, 16.0),
+            },
+            texture: crate::external_texture(view, device_size(2, 1)),
+        });
+        scene.finish();
+
+        let image = renderer.render_scene_to_image(&scene, device_size(64, 16))?;
+        assert_pixel(&image, 8, 8, VIOLET);
+        assert_pixel(&image, 24, 8, VIOLET);
+        assert_pixel(&image, 40, 8, BLACK);
+        Ok(())
+    }
 
     #[cfg(target_os = "linux")]
     #[test]

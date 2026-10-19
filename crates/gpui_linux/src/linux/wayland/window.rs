@@ -1,4 +1,5 @@
 use std::{
+    any::Any,
     cell::{Cell, Ref, RefCell, RefMut},
     ffi::c_void,
     ptr::NonNull,
@@ -2217,6 +2218,10 @@ impl PlatformWindow for WaylandWindow {
 
     fn gpu_specs(&self) -> Option<GpuSpecs> {
         self.borrow().renderer.as_ref()?.gpu_specs()
+    }
+
+    fn gpu_device(&self) -> Option<Arc<dyn Any + Send + Sync>> {
+        Some(Arc::new(self.borrow().renderer.as_ref()?.device()?))
     }
 
     fn play_system_bell(&self) {

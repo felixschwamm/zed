@@ -7676,6 +7676,7 @@ dependencies = [
  "criterion",
  "etagere",
  "gpui",
+ "gpui_platform",
  "gpui_util",
  "image",
  "itertools 0.14.0",

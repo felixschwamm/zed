@@ -1360,3 +1360,19 @@ fn fs_surface(input: SurfaceVarying) -> @location(0) vec4<f32> {
 
     return ycbcr_to_RGB * y_cb_cr;
 }
+
+// --- texture surfaces --- //
+
+// Textures rendered by the application; they share `vs_surface` and its
+// parameters with the CoreVideo surfaces above.
+@group(1) @binding(1) var t_texture_surface: texture_2d<f32>;
+@group(1) @binding(2) var s_texture_surface: sampler;
+
+@fragment
+fn fs_texture_surface(input: SurfaceVarying) -> @location(0) vec4<f32> {
+    let color = textureSampleLevel(t_texture_surface, s_texture_surface, input.texture_position, 0.0);
+    if (any(input.clip_distances < vec4<f32>(0.0))) {
+        return vec4<f32>(0.0);
+    }
+    return blend_color(color, 1.0);
+}

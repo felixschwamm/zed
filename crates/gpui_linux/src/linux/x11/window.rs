@@ -30,7 +30,8 @@ use x11rb::{
 };
 
 use std::{
-    cell::RefCell, ffi::c_void, fmt::Display, num::NonZeroU32, ptr::NonNull, rc::Rc, sync::Arc,
+    any::Any, cell::RefCell, ffi::c_void, fmt::Display, num::NonZeroU32, ptr::NonNull, rc::Rc,
+    sync::Arc,
 };
 
 use super::{X11Display, XINPUT_ALL_DEVICE_GROUPS, XINPUT_ALL_DEVICES};
@@ -1978,6 +1979,10 @@ impl PlatformWindow for X11Window {
 
     fn gpu_specs(&self) -> Option<GpuSpecs> {
         self.0.state.borrow().renderer.as_ref()?.gpu_specs()
+    }
+
+    fn gpu_device(&self) -> Option<Arc<dyn Any + Send + Sync>> {
+        Some(Arc::new(self.0.state.borrow().renderer.as_ref()?.device()?))
     }
 
     fn play_system_bell(&self) {

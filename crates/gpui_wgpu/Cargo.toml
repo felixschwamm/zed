@@ -57,6 +57,9 @@ gpui = { workspace = true, features = ["bench-support"] }
 image.workspace = true
 naga = { version = "29.0.4", features = ["wgsl-in"] }
 
+[target.'cfg(any(target_os = "linux", target_os = "freebsd"))'.dev-dependencies]
+gpui_platform = { workspace = true, features = ["font-kit", "wayland", "x11"] }
+
 [[bench]]
 name = "layout_line"
 harness = false
