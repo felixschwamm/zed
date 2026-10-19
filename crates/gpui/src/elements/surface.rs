@@ -14,12 +14,22 @@ pub enum SurfaceSource {
     /// A CoreVideo image buffer
     #[cfg(any(target_os = "macos", target_os = "ios"))]
     Surface(CFRetained<CVPixelBuffer>),
+    /// A texture rendered by the application on the window's GPU device
+    #[cfg(any(target_os = "linux", target_os = "freebsd"))]
+    Texture(crate::ExternalTexture),
 }
 
 #[cfg(any(target_os = "macos", target_os = "ios"))]
 impl From<CFRetained<CVPixelBuffer>> for SurfaceSource {
     fn from(value: CFRetained<CVPixelBuffer>) -> Self {
         SurfaceSource::Surface(value)
+    }
+}
+
+#[cfg(any(target_os = "linux", target_os = "freebsd"))]
+impl From<crate::ExternalTexture> for SurfaceSource {
+    fn from(value: crate::ExternalTexture) -> Self {
+        SurfaceSource::Texture(value)
     }
 }
 
@@ -31,7 +41,12 @@ pub struct Surface {
 }
 
 /// Create a new surface element.
-#[cfg(any(target_os = "macos", target_os = "ios"))]
+#[cfg(any(
+    target_os = "macos",
+    target_os = "ios",
+    target_os = "linux",
+    target_os = "freebsd"
+))]
 pub fn surface(source: impl Into<SurfaceSource>) -> Surface {
     Surface {
         source: source.into(),
@@ -89,14 +104,24 @@ impl Element for Surface {
         _global_id: Option<&GlobalElementId>,
         _inspector_id: Option<&InspectorElementId>,
         #[cfg_attr(
-            not(any(target_os = "macos", target_os = "ios")),
+            not(any(
+                target_os = "macos",
+                target_os = "ios",
+                target_os = "linux",
+                target_os = "freebsd"
+            )),
             allow(unused_variables)
         )]
         bounds: Bounds<Pixels>,
         _: &mut Self::RequestLayoutState,
         _: &mut Self::PrepaintState,
         #[cfg_attr(
-            not(any(target_os = "macos", target_os = "ios")),
+            not(any(
+                target_os = "macos",
+                target_os = "ios",
+                target_os = "linux",
+                target_os = "freebsd"
+            )),
             allow(unused_variables)
         )]
         window: &mut Window,
@@ -112,6 +137,11 @@ impl Element for Surface {
                 let new_bounds = self.object_fit.get_bounds(bounds, size);
                 // TODO: Add support for corner_radii
                 window.paint_surface(new_bounds, surface.clone());
+            }
+            #[cfg(any(target_os = "linux", target_os = "freebsd"))]
+            SurfaceSource::Texture(texture) => {
+                let new_bounds = self.object_fit.get_bounds(bounds, texture.size());
+                window.paint_external_texture(new_bounds, texture.clone());
             }
             #[allow(unreachable_patterns)]
             _ => {}

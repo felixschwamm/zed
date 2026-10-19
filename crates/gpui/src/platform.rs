@@ -1347,6 +1347,12 @@ pub trait PlatformWindow: HasWindowHandle + HasDisplayHandle {
     fn set_client_inset(&self, _inset: Pixels) {}
     fn gpu_specs(&self) -> Option<GpuSpecs>;
 
+    /// Renderer-specific handles to the GPU device this window draws with, for
+    /// applications that render their own textures (see [`crate::ExternalTexture`]).
+    fn gpu_device(&self) -> Option<std::sync::Arc<dyn std::any::Any + Send + Sync>> {
+        None
+    }
+
     fn update_ime_position(&self, _bounds: Bounds<Pixels>);
 
     // Mobile platform methods.

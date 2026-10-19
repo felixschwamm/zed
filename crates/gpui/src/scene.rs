@@ -771,7 +771,62 @@ pub struct PaintSurface {
     pub content_mask: ContentMask<ScaledPixels>,
     #[cfg(any(target_os = "macos", target_os = "ios"))]
     pub image_buffer: objc2_core_foundation::CFRetained<objc2_core_video::CVPixelBuffer>,
+    #[cfg(any(target_os = "linux", target_os = "freebsd"))]
+    pub texture: ExternalTexture,
 }
+
+/// A texture the application renders on the window's GPU device, composited
+/// by the platform renderer like any other primitive.
+///
+/// The handle is opaque to GPUI; the platform renderer defines what it holds.
+/// On Linux and FreeBSD the wgpu renderer expects a `wgpu::TextureView` of an
+/// RGBA texture created on the device that `gpui_wgpu::WgpuWindowExt::wgpu_device` returns.
+#[cfg(any(target_os = "linux", target_os = "freebsd"))]
+#[derive(Clone)]
+pub struct ExternalTexture {
+    handle: std::sync::Arc<dyn std::any::Any + Send + Sync>,
+    size: Size<crate::DevicePixels>,
+}
+
+#[cfg(any(target_os = "linux", target_os = "freebsd"))]
+impl ExternalTexture {
+    /// Wraps a renderer-specific texture handle of the given size in pixels.
+    pub fn new(
+        handle: std::sync::Arc<dyn std::any::Any + Send + Sync>,
+        size: Size<crate::DevicePixels>,
+    ) -> Self {
+        Self { handle, size }
+    }
+
+    /// The renderer-specific texture handle.
+    pub fn handle(&self) -> &(dyn std::any::Any + Send + Sync) {
+        self.handle.as_ref()
+    }
+
+    /// The size of the texture in pixels.
+    pub fn size(&self) -> Size<crate::DevicePixels> {
+        self.size
+    }
+}
+
+#[cfg(any(target_os = "linux", target_os = "freebsd"))]
+impl Debug for ExternalTexture {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ExternalTexture")
+            .field("size", &self.size)
+            .finish_non_exhaustive()
+    }
+}
+
+#[cfg(any(target_os = "linux", target_os = "freebsd"))]
+impl PartialEq for ExternalTexture {
+    fn eq(&self, other: &Self) -> bool {
+        std::sync::Arc::ptr_eq(&self.handle, &other.handle) && self.size == other.size
+    }
+}
+
+#[cfg(any(target_os = "linux", target_os = "freebsd"))]
+impl Eq for ExternalTexture {}
 
 impl From<PaintSurface> for Primitive {
     fn from(surface: PaintSurface) -> Self {

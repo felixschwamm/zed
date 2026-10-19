@@ -5171,6 +5171,30 @@ impl Window {
         });
     }
 
+    /// Paint a texture rendered by the application into the scene for the next
+    /// frame at the current z-index.
+    ///
+    /// This method should only be called as part of the paint phase of element drawing.
+    #[cfg(any(target_os = "linux", target_os = "freebsd"))]
+    pub fn paint_external_texture(
+        &mut self,
+        bounds: Bounds<Pixels>,
+        texture: crate::ExternalTexture,
+    ) {
+        use crate::PaintSurface;
+
+        self.invalidator.debug_assert_paint();
+
+        let bounds = self.snap_bounds(bounds);
+        let content_mask = self.snapped_content_mask();
+        self.next_frame.scene.insert_primitive(PaintSurface {
+            order: 0,
+            bounds,
+            content_mask,
+            texture,
+        });
+    }
+
     /// Removes an image from the sprite atlas.
     pub fn drop_image(&mut self, data: Arc<RenderImage>) -> Result<()> {
         for frame_index in 0..data.frame_count() {
@@ -6925,6 +6949,13 @@ impl Window {
     /// Currently returns None on Mac and Windows.
     pub fn gpu_specs(&self) -> Option<GpuSpecs> {
         self.platform_window.gpu_specs()
+    }
+
+    /// Renderer-specific handles to the GPU device this window draws with.
+    /// The wgpu renderer returns `gpui_wgpu::WgpuDevice`; use
+    /// `gpui_wgpu::WgpuWindowExt::wgpu_device` for a typed accessor.
+    pub fn gpu_device(&self) -> Option<Arc<dyn Any + Send + Sync>> {
+        self.platform_window.gpu_device()
     }
 
     /// Perform titlebar double-click action.
